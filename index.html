@@ -10,9 +10,9 @@
 html { font-family: ui-monospace, Menlo, Consolas, monospace }
 body { margin: 0 }
 div { display: flex; flex-flow: column nowrap }
-main { margin: 50px 50px 0; white-space: pre }
+main { margin: 50px 50px 0; white-space: pre; display: flex; align-items: center }
 main::before { content: "$ " }
-input { font: inherit; border: none; padding: 0; outline: none; background: none }
+input { flex: 1; font: inherit; border: none; padding: 0; outline: none; background: none }
 pre { font: inherit; margin: 0 50px 50px }
 </style>
 <main>npm install <input id="$pkg" placeholder="&lt;package name&gt;" autofocus spellcheck=false autocapitalize=off autocomplete=off></main>
@@ -93,10 +93,11 @@ pre { font: inherit; margin: 0 50px 50px }
     const packages = {},   // { [name@version]: size }
           failed = {},     // { [name@spec]: true }
           duplicates = {}, // { [name]: [versions] }
-          entryPoint = {}
+          entryPoint = {}, // { name, version }
+          dependents = {}  // { [name@version]: "who_depend_on_me@version" }
 
     const done = ora()
-    const load = async (spec, entry = false) => {
+    const load = async (spec, { entry = false, parent = null } = {}) => {
       if (spec in packages || spec in failed) return
       done.text(spec + '…')
 
@@ -125,6 +126,7 @@ pre { font: inherit; margin: 0 50px 50px }
 
       if (data) {
         const info = data.versions[version]
+        dependents[full] = parent
         console.log(name, info)
         if ((!info.cpu || info.cpu.includes(cpu)) && (!info.os || info.os.includes(os))) {
           if (info.dist.unpackedSize) {
@@ -140,15 +142,15 @@ pre { font: inherit; margin: 0 50px 50px }
 
         const tasks = []
         if (info.dependencies) for (const dep in info.dependencies) {
-          tasks.push(load(dep + '@' + info.dependencies[dep]))
+          tasks.push(load(dep + '@' + info.dependencies[dep], { parent: full }))
         }
         if (info.peerDependencies) for (const dep in info.peerDependencies) {
           if (!info.peerDependenciesMeta || info.peerDependenciesMeta[dep]?.optional !== true) {
-            tasks.push(load(dep + '@' + info.peerDependencies[dep]))
+            tasks.push(load(dep + '@' + info.peerDependencies[dep], { parent: full }))
           }
         }
         if (info.optionalDependencies) for (const dep in info.optionalDependencies) {
-          tasks.push(load(dep + '@' + info.optionalDependencies[dep]))
+          tasks.push(load(dep + '@' + info.optionalDependencies[dep], { parent: full }))
         }
 
         await Promise.allSettled(tasks)
@@ -157,7 +159,7 @@ pre { font: inherit; margin: 0 50px 50px }
       }
     }
 
-    await load(spec, true)
+    await load(spec, { entry: true })
     done()
     $pkg.disabled = false
 
@@ -168,8 +170,13 @@ pre { font: inherit; margin: 0 50px 50px }
       }
     }
 
+    const search_dependents = (key) => {
+      if (!dependents[key]) return key
+      return key + ' - ' + search_dependents(dependents[key])
+    }
+
     if (Object.keys(packages).length > 0) {
-      console.log(structuredClone({ packages, failed }))
+      console.log(structuredClone({ packages, failed, dependents }))
 
       const keysBySize = Object.keys(packages).sort((a, b) => packages[b] - packages[a])
       let max_width = 0, max_width_right = 0, stdout = '\n', total = 0
@@ -193,6 +200,7 @@ pre { font: inherit; margin: 0 50px 50px }
         for (const key of Object.keys(duplicates).sort()) {
           duplicates[key].forEach(version => {
             stdout += key + '@' + version + '\n'
+            stdout += '  from ' + search_dependents(dependents[key + '@' + version]) + '\n'
           })
         }
       }
@@ -217,6 +225,57 @@ pre { font: inherit; margin: 0 50px 50px }
     } else {
       $stdout.textContent = 'Error: package not found'
     }
+
+    decorate_dependents(dependents)
+  }
+
+  function decorate_dependents(dependents) {
+    let lines = $stdout.textContent.split('\n')
+    let end = lines.findIndex(line => line[0] === '-')
+    $stdout.textContent = '\n'
+    for (let i = 1; i < end; ++i) {
+      let line = $stdout.appendChild(document.createElement('div'))
+      let key = lines[i].slice(0, lines[i].indexOf(' '))
+      line.dataset.key = key
+      line.textContent = lines[i]
+      line.onpointerenter = refresh_decorators.bind(null, key, dependents)
+    }
+    $stdout.appendChild(document.createTextNode(lines.slice(end).join('\n')))
+  }
+
+  function search_left(key, dependents) {
+    for (var result = []; dependents[key]; key = dependents[key]) {
+      result.push(key)
+    }
+    result.shift()
+    return result
+  }
+
+  function search_right(key, dependents) {
+    const result = []
+    for (const next in dependents) {
+      if (dependents[next] === key) {
+        result.push(next)
+      }
+    }
+    return result
+  }
+
+  function refresh_decorators(key, dependents) {
+    const green = search_left(key, dependents)
+    const pink = search_right(key, dependents)
+    $stdout.querySelectorAll('[data-key]').forEach(row => {
+      const key_ = row.dataset.key
+      if (green.includes(key_)) {
+        row.style.backgroundColor = '#33ff3390'
+      } else if (pink.includes(key_)) {
+        row.style.backgroundColor = '#ff776690'
+      } else if (key === key_) {
+        row.style.backgroundColor = '#ffffff60'
+      } else {
+        row.style.backgroundColor = ''
+      }
+    })
   }
 
   if (location.hash) {
