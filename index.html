@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang=en>
+<meta charset=UTF-8>
+<link rel=icon type=image/svg+xml href=/favicon.svg>
+<meta name=color-scheme content="light dark">
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>pkg-size</title>
+<style>
+* { box-sizing: border-box }
+html { font-family: ui-monospace, Menlo, Consolas, monospace }
+body { margin: 0 }
+div { display: flex; flex-flow: column nowrap }
+main { margin: 50px 50px 0; white-space: pre }
+main::before { content: "$ " }
+input { font: inherit; border: none; padding: 0; outline: none; background: none }
+pre { font: inherit; margin: 0 50px 50px }
+</style>
+<main>npm install <input id="$pkg" placeholder="&lt;package name&gt;" autofocus spellcheck=false autocapitalize=off autocomplete=off></main>
+<pre id="$stdout"></pre>
+<script>(() => {
+  $pkg.oninput = function update() {
+    const name = this.value.trim()
+    history.replaceState(null, '', name ? '#' + name : location.pathname)
+  }
+  $pkg.onchange = function submit() {
+    const name = this.value.trim()
+    name && install(name)
+  }
+  const dots = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', len = dots.length
+  const ora = () => {
+    let $, i, t, s = ''
+    $ = $stdout.appendChild(document.createElement('span'))
+    $.textContent = dots[i = 0]
+    t = setInterval(() => { $.textContent = dots[(++i) % len] + ' ' + s }, 80)
+    return Object.assign(() => { clearInterval(t), $.remove() }, { text: (v) => { s = v } })
+  }
+  const UA_ = (async () => {
+    let os, cpu
+    if (navigator.userAgentData) {
+      const { bitness, platform } = await navigator.userAgentData.getHighEntropyValues(['bitness'])
+      os = platform === 'macOS' ? 'darwin' : platform === 'Windows' ? 'win32' : 'linux'
+      cpu = bitness === '64' ? 'x64' : 'x86'
+    } else {
+      const ua = navigator.userAgent
+      os = ua.includes('Macintosh') ? 'darwin' : ua.includes('Windows') ? 'win32' : 'linux'
+      cpu = ua.includes('WOW64') || ua.includes('Win64') || ua.includes('x64') ? 'x64' : 'x86'
+    }
+    return { os, cpu }
+  })()
+  const prettyBytes_ = import('https://esm.sh/pretty-bytes@6.1.1')
+
+  const fetch_cache = new Map
+  const follow_redirects = (url) => {
+    if (fetch_cache.has(url)) return fetch_cache.get(url)
+    const promise = fetch(url)
+      .then(r => r.ok ? r.url : r.text().then(msg => { throw new Error(msg) }))
+      .catch(err => {
+        fetch_cache.delete(url)
+        throw err
+      })
+    fetch_cache.set(url, promise)
+    return promise
+  }
+
+  const semver = /^[\s=v]*(\d+)\.(\d+)\.(\d+)(?:-?((?:\d+|\d*[A-Za-z-][\dA-Za-z-]*)(?:\.(?:\d+|\d*[A-Za-z-][\dA-Za-z-]*))*))?(?:\+([\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*))?$/
+  const resolve = async (spec) => {
+    let name, at = spec.indexOf('@', 1)
+    if (at > 0) {
+      name = spec.slice(0, at)
+      spec = spec.slice(at + 1)
+    } else {
+      name = spec
+      spec = '*'
+    }
+    if (!semver.test(spec)) {
+      spec = await follow_redirects(`https://unpkg.com/${name}@${spec}/package.json`)
+      spec = spec.slice(18 + name.length + 1)
+      spec = spec.slice(0, spec.indexOf('/'))
+    }
+    return { name, version: spec }
+  }
+
+  const mirrors = ['https://registry.npmjs.com', 'https://registry.npmjs.cf'],
+        corgi = 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*'
+
+  async function install(spec) {
+    $pkg.disabled = true
+    $stdout.textContent = ''
+
+    const { os, cpu } = await UA_
+    const { default: prettyBytes } = await prettyBytes_
+
+    const packages = {},   // { [name@version]: size }
+          failed = {},     // { [name@spec]: true }
+          duplicates = {}, // { [name]: [versions] }
+          entryPoint = {}
+
+    const done = ora()
+    const load = async (spec, entry = false) => {
+      if (spec in packages || spec in failed) return
+      done.text(spec + '…')
+
+      const { name, version } = await resolve(spec).catch(err => {
+        failed[spec] ||= 'failed to resolve ' + spec
+        return {}
+      })
+      if (!name) return
+
+      if (entry) Object.assign(entryPoint, { name, version })
+
+      const full = name + '@' + version
+      done.text(full + '…')
+      if (full in packages || full in failed) return
+
+      duplicates[name] ||= new Set
+      duplicates[name].add(version)
+      // prepare a place for the package, preventing duplicate loading
+      packages[full] = 0
+
+      let data
+      for (const registry of mirrors) {
+        data = await fetch(registry + '/' + encodeURIComponent(name), { headers: { accept: corgi } }).then(r => r.ok && r.json())
+        if (data) break
+      }
+
+      if (data) {
+        const info = data.versions[version]
+        console.log(name, info)
+        if ((!info.cpu || info.cpu.includes(cpu)) && (!info.os || info.os.includes(os))) {
+          if (info.dist.unpackedSize) {
+            packages[full] = info.dist.unpackedSize
+          } else {
+            delete packages[full]
+            failed[full] ||= 'undefined unpackedSize' // very old package
+          }
+        } else {
+          delete packages[full]
+          failed[full] ||= 'architecture mismatch'
+        }
+
+        const tasks = []
+        if (info.dependencies) for (const dep in info.dependencies) {
+          tasks.push(load(dep + '@' + info.dependencies[dep]))
+        }
+        if (info.peerDependencies) for (const dep in info.peerDependencies) {
+          if (!info.peerDependenciesMeta || info.peerDependenciesMeta[dep]?.optional !== true) {
+            tasks.push(load(dep + '@' + info.peerDependencies[dep]))
+          }
+        }
+        if (info.optionalDependencies) for (const dep in info.optionalDependencies) {
+          tasks.push(load(dep + '@' + info.optionalDependencies[dep]))
+        }
+
+        await Promise.allSettled(tasks)
+      } else {
+        failed[full] ||= 'not found'
+      }
+    }
+
+    await load(spec, true)
+    done()
+    $pkg.disabled = false
+
+    for (const name in duplicates) {
+      duplicates[name] = new Set(duplicates[name])
+      if (duplicates[name].size <= 1) {
+        delete duplicates[name]
+      }
+    }
+
+    if (Object.keys(packages).length > 0) {
+      console.log(structuredClone({ packages, failed }))
+
+      const keysBySize = Object.keys(packages).sort((a, b) => packages[b] - packages[a])
+      let max_width = 0, max_width_right = 0, stdout = '\n', total = 0
+      for (const key of keysBySize) {
+        total += packages[key]
+        const right = prettyBytes(packages[key]).indexOf(' ')
+        max_width = Math.max(max_width, key.length)
+        max_width_right = Math.max(max_width_right, right)
+      }
+      max_width_right += 3 // space 'kB'
+      for (const key of keysBySize) {
+        stdout += key.padEnd(max_width) + '  ' + prettyBytes(packages[key]).padStart(max_width_right) + '\n'
+      }
+      stdout += '-'.repeat(max_width + max_width_right + 2) + '\n'
+      stdout += 'Total'.padEnd(max_width) + '  ' + prettyBytes(total).padStart(max_width_right) + '\n'
+
+      document.title = entryPoint.name + '@' + entryPoint.version + ' ' + prettyBytes(total)
+
+      if (Object.keys(duplicates).length > 0) {
+        stdout += '\nDuplicates\n'
+        for (const key of Object.keys(duplicates).sort()) {
+          duplicates[key].forEach(version => {
+            stdout += key + '@' + version + '\n'
+          })
+        }
+      }
+
+      if (Object.keys(failed).length > 0) {
+        stdout += '\nNot calculated because of…\n'
+        const tally = {}
+        for (const key in failed) {
+          const reason = failed[key]
+          tally[reason] ||= []
+          tally[reason].push(key)
+        }
+        for (const key in tally) {
+          stdout += key + '\n'
+          for (const spec of tally[key]) {
+            stdout += '  ' + spec + '\n'
+          }
+        }
+      }
+
+      $stdout.textContent = stdout
+    } else {
+      $stdout.textContent = 'Error: package not found'
+    }
+  }
+
+  if (location.hash) {
+    $pkg.value = location.hash.slice(1)
+    $pkg.onchange()
+  }
+})();</script>
