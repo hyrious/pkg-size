@@ -73,15 +73,32 @@ pre { font: inherit; margin: 0 50px 50px }
       spec = '*'
     }
     if (!semver.test(spec)) {
-      spec = await follow_redirects(`https://unpkg.com/${name}@${spec}/package.json`)
-      spec = spec.slice(18 + name.length + 1)
-      spec = spec.slice(0, spec.indexOf('/'))
+      let resolved = await fetch(`https://data.jsdelivr.com/v1/package/resolve/npm/${name}@${spec}`).then(r => r.ok && r.json())
+      if (resolved) spec = resolved.version
+      else {
+        spec = await follow_redirects(`https://unpkg.com/${name}@${spec}/package.json`)
+        spec = spec.slice(18 + name.length + 1)
+        spec = spec.slice(0, spec.indexOf('/'))
+      }
     }
     return { name, version: spec }
   }
 
-  const mirrors = ['https://registry.npmjs.com', 'https://registry.npmjs.cf'],
+  const mirrors = ['https://registry.npmjs.com', 'https://registry.npmmirror.com'],
         corgi = 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*'
+
+  // Sort mirrors by latency
+  const ping = async (url) => {
+    const start = performance.now()
+    const ok = await fetch(url + '/-/ping', { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false)
+    return ok ? performance.now() - start : 114514
+  }
+
+  const sorted = Promise.all(mirrors.map(url => ping(url).then(time => ({ url, time })))).then(results => {
+    results.sort((a, b) => a.time - b.time)
+    mirrors.splice(0, mirrors.length, ...results.map(r => r.url))
+    console.log('mirrors', mirrors)
+  })
 
   async function install(spec) {
     $pkg.disabled = true
@@ -119,8 +136,13 @@ pre { font: inherit; margin: 0 50px 50px }
       packages[full] = 0
 
       let data
+      await sorted
       for (const registry of mirrors) {
-        data = await fetch(registry + '/' + encodeURIComponent(name), { headers: { accept: corgi } }).then(r => r.ok && r.json())
+        console.debug('fetching', registry + '/' + encodeURIComponent(name))
+        data = await fetch(registry + '/' + encodeURIComponent(name), {
+          headers: { accept: corgi },
+          signal: AbortSignal.timeout(5000)
+        }).then(r => r.ok && r.json()).catch(() => null)
         if (data) break
       }
 
@@ -240,6 +262,7 @@ pre { font: inherit; margin: 0 50px 50px }
       line.textContent = lines[i]
       line.onpointerenter = refresh_decorators.bind(null, key, dependents)
     }
+    $stdout.onclick = toggle_decorators
     $stdout.appendChild(document.createTextNode(lines.slice(end).join('\n')))
   }
 
@@ -261,7 +284,9 @@ pre { font: inherit; margin: 0 50px 50px }
     return result
   }
 
+  let lock_decorators = false
   function refresh_decorators(key, dependents) {
+    if (lock_decorators) return
     const green = search_left(key, dependents)
     const pink = search_right(key, dependents)
     $stdout.querySelectorAll('[data-key]').forEach(row => {
@@ -271,11 +296,16 @@ pre { font: inherit; margin: 0 50px 50px }
       } else if (pink.includes(key_)) {
         row.style.backgroundColor = '#ff776690'
       } else if (key === key_) {
-        row.style.backgroundColor = '#ffffff60'
+        row.style.backgroundColor = '#7f7f7f60'
       } else {
         row.style.backgroundColor = ''
       }
     })
+  }
+
+  function toggle_decorators(ev) {
+    lock_decorators = !lock_decorators
+    $stdout.dataset.lock = String(lock_decorators)
   }
 
   if (location.hash) {
