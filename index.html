@@ -100,6 +100,21 @@ pre { font: inherit; margin: 0 50px 50px }
     console.log('mirrors', mirrors)
   })
 
+  // calculate 'unpackedSize' from jsdelivr api
+  const sum = (files) => {
+    let result = 0
+    for (const file of files) {
+      if (file.type === 'file') {
+        result += file.size
+      } else if (file.type === 'directory') {
+        result += sum(file.files)
+      } else {
+        console.warn('unknown file type', file)
+      }
+    }
+    return result
+  }
+
   async function install(spec) {
     $pkg.disabled = true
     $stdout.textContent = ''
@@ -154,8 +169,14 @@ pre { font: inherit; margin: 0 50px 50px }
           if (info.dist.unpackedSize) {
             packages[full] = info.dist.unpackedSize
           } else {
-            delete packages[full]
-            failed[full] ||= 'undefined unpackedSize' // very old package
+            // Fallbacks to use jsDelivr data API
+            const jsdelivr_data = await fetch(`https://data.jsdelivr.com/v1/package/npm/${full}`).then(r => r.ok && r.json()).catch(() => false)
+            if (jsdelivr_data) {
+              packages[full] = sum(jsdelivr_data.files)
+            } else {
+              delete packages[full]
+              failed[full] ||= 'undefined unpackedSize' // very old package
+            }
           }
         } else {
           delete packages[full]
@@ -236,9 +257,13 @@ pre { font: inherit; margin: 0 50px 50px }
           tally[reason].push(key)
         }
         for (const key in tally) {
-          stdout += key + '\n'
-          for (const spec of tally[key]) {
-            stdout += '  ' + spec + '\n'
+          if (key === 'architecture mismatch') {
+            stdout += key + ` (${tally[key].length} packages omitted)\n`
+          } else {
+            stdout += key + '\n'
+            for (const spec of tally[key]) {
+              stdout += '  ' + spec + '\n'
+            }
           }
         }
       }
