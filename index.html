@@ -48,6 +48,7 @@ pre { font: inherit; margin: 0 50px 50px }
     return { os, cpu }
   })()
   const prettyBytes_ = import('https://esm.sh/pretty-bytes@6.1.1')
+  const idbKeyVal_ = import('https://esm.sh/idb-keyval@6.2.1')
 
   const fetch_cache = new Map
   const follow_redirects = (url) => {
@@ -84,13 +85,13 @@ pre { font: inherit; margin: 0 50px 50px }
     return { name, version: spec }
   }
 
-  const mirrors = ['https://registry.npmjs.com', 'https://registry.npmmirror.com'],
+  const mirrors = ['https://registry.npmjs.org', 'https://registry.npmmirror.com'],
         corgi = 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*'
 
   // Sort mirrors by latency
   const ping = async (url) => {
     const start = performance.now()
-    const ok = await fetch(url + '/-/ping', { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false)
+    const ok = await fetch(url + '/-/ping', { signal: AbortSignal.timeout(2000), mode: 'no-cors' }).then(r => r.ok).catch(() => false)
     return ok ? performance.now() - start : 114514
   }
 
@@ -100,7 +101,7 @@ pre { font: inherit; margin: 0 50px 50px }
     console.log('mirrors', mirrors)
   })
 
-  // calculate 'unpackedSize' from jsdelivr api
+  // Calculate 'unpackedSize' from jsdelivr api
   const sum = (files) => {
     let result = 0
     for (const file of files) {
@@ -115,14 +116,31 @@ pre { font: inherit; margin: 0 50px 50px }
     return result
   }
 
+  const download_size = async (url, idb, store) => {
+    const val = await idb.get(url, store)
+    if (val != null) return val;
+
+    const ctrl = new AbortController()
+    const resp = await fetch(url, { signal: ctrl.signal })
+    const size = Number.parseInt(resp.headers.get('content-length')) || 0
+    ctrl.abort()
+
+    await idb.set(url, size, store)
+    return size
+  }
+
   async function install(spec) {
     $pkg.disabled = true
     $stdout.textContent = ''
 
     const { os, cpu } = await UA_
     const { default: prettyBytes } = await prettyBytes_
+    const idb = await idbKeyVal_
+
+    const store = idb.createStore("npm-downloads", "packages")
 
     const packages = {},   // { [name@version]: size }
+          downloads = {},  // { [name@version]: size }
           failed = {},     // { [name@spec]: true }
           duplicates = {}, // { [name]: [versions] }
           entryPoint = {}, // { name, version }
@@ -147,7 +165,7 @@ pre { font: inherit; margin: 0 50px 50px }
 
       duplicates[name] ||= new Set
       duplicates[name].add(version)
-      // prepare a place for the package, preventing duplicate loading
+      // Prepare a place for the package, preventing duplicate loading
       packages[full] = 0
 
       let data
@@ -166,6 +184,9 @@ pre { font: inherit; margin: 0 50px 50px }
         dependents[full] = parent
         console.log(name, info)
         if ((!info.cpu || info.cpu.includes(cpu)) && (!info.os || info.os.includes(os))) {
+          if (info.dist.tarball) {
+            downloads[full] = await download_size(info.dist.tarball, idb, store)
+          }
           if (info.dist.unpackedSize) {
             packages[full] = info.dist.unpackedSize
           } else {
@@ -219,10 +240,10 @@ pre { font: inherit; margin: 0 50px 50px }
     }
 
     if (Object.keys(packages).length > 0) {
-      console.log(structuredClone({ packages, failed, dependents }))
+      console.log(structuredClone({ packages, downloads, failed, dependents }))
 
       const keysBySize = Object.keys(packages).sort((a, b) => packages[b] - packages[a])
-      let max_width = 0, max_width_right = 0, stdout = '\n', total = 0
+      let max_width = 0, max_width_right = 0, stdout = '\n', total = 0, download, downloads_total = 0
       for (const key of keysBySize) {
         total += packages[key]
         const right = prettyBytes(packages[key]).indexOf(' ')
@@ -231,10 +252,19 @@ pre { font: inherit; margin: 0 50px 50px }
       }
       max_width_right += 3 // space 'kB'
       for (const key of keysBySize) {
-        stdout += key.padEnd(max_width) + '  ' + prettyBytes(packages[key]).padStart(max_width_right) + '\n'
+        stdout += key.padEnd(max_width) + '  ' + prettyBytes(packages[key]).padStart(max_width_right)
+        if ((download = downloads[key])) {
+          downloads_total += download
+          stdout += ' (' + prettyBytes(download) + ')'
+        }
+        stdout += '\n'
       }
       stdout += '-'.repeat(max_width + max_width_right + 2) + '\n'
-      stdout += 'Total'.padEnd(max_width) + '  ' + prettyBytes(total).padStart(max_width_right) + '\n'
+      stdout += 'Total'.padEnd(max_width) + '  ' + prettyBytes(total).padStart(max_width_right)
+      if (downloads_total) {
+        stdout += ' (' + prettyBytes(downloads_total) + ')'
+      }
+      stdout += '\n'
 
       document.title = entryPoint.name + '@' + entryPoint.version + ' ' + prettyBytes(total)
 
@@ -248,8 +278,12 @@ pre { font: inherit; margin: 0 50px 50px }
         }
       }
 
+      if (downloads_total) {
+        stdout += '\nNumbers in (...) are tarball size\n'
+      }
+
       if (Object.keys(failed).length > 0) {
-        stdout += '\nNot calculated because of…\n'
+        stdout += '\nThese packages are not calculated because of…\n'
         const tally = {}
         for (const key in failed) {
           const reason = failed[key]
