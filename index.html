@@ -91,7 +91,8 @@ pre { font: inherit; margin: 0 50px 50px }
   // Sort mirrors by latency
   const ping = async (url) => {
     const start = performance.now()
-    const ok = await fetch(url + '/-/ping', { signal: AbortSignal.timeout(2000), mode: 'no-cors' }).then(r => r.ok).catch(() => false)
+    const ok = await fetch(url + '/noop-package', { signal: AbortSignal.timeout(2000), cache: 'no-store' })
+      .then(r => r.ok).catch(() => false)
     return ok ? performance.now() - start : 114514
   }
 
@@ -139,12 +140,13 @@ pre { font: inherit; margin: 0 50px 50px }
 
     const store = idb.createStore("npm-downloads", "packages")
 
-    const packages = {},   // { [name@version]: size }
-          downloads = {},  // { [name@version]: size }
-          failed = {},     // { [name@spec]: true }
-          duplicates = {}, // { [name]: [versions] }
-          entryPoint = {}, // { name, version }
-          dependents = {}  // { [name@version]: "who_depend_on_me@version" }
+    const packages = {},     // { [name@version]: size }
+          downloads = {},    // { [name@version]: size }
+          failed = {},       // { [name@spec]: true }
+          duplicates = {},   // { [name]: [versions] }
+          entryPoint = {},   // { name, version }
+          dependents = {},   // { [name@version]: "who_depend_on_me@version" }
+          dependencies = {}  // { [name@version]: number of deps + peer, no optional }
 
     const done = ora()
     const load = async (spec, { entry = false, parent = null } = {}) => {
@@ -191,7 +193,8 @@ pre { font: inherit; margin: 0 50px 50px }
             packages[full] = info.dist.unpackedSize
           } else {
             // Fallbacks to use jsDelivr data API
-            const jsdelivr_data = await fetch(`https://data.jsdelivr.com/v1/package/npm/${full}`).then(r => r.ok && r.json()).catch(() => false)
+            const jsdelivr_data = await fetch(`https://data.jsdelivr.com/v1/package/npm/${full}`)
+              .then(r => r.ok && r.json()).catch(() => false)
             if (jsdelivr_data) {
               packages[full] = sum(jsdelivr_data.files)
             } else {
@@ -216,6 +219,10 @@ pre { font: inherit; margin: 0 50px 50px }
         if (info.optionalDependencies) for (const dep in info.optionalDependencies) {
           tasks.push(load(dep + '@' + info.optionalDependencies[dep], { parent: full }))
         }
+        dependencies[full] = Object.keys({
+          ...info.dependencies,
+          ...info.peerDependencies,
+        }).length
 
         await Promise.allSettled(tasks)
       } else {
@@ -243,19 +250,26 @@ pre { font: inherit; margin: 0 50px 50px }
       console.log(structuredClone({ packages, downloads, failed, dependents }))
 
       const keysBySize = Object.keys(packages).sort((a, b) => packages[b] - packages[a])
-      let max_width = 0, max_width_right = 0, stdout = '\n', total = 0, download, downloads_total = 0
+      let max_width = 0, max_width_right = 0, stdout = '\n', total = 0,
+          download, download_width = 0, downloads_total = 0
       for (const key of keysBySize) {
         total += packages[key]
         const right = prettyBytes(packages[key]).indexOf(' ')
         max_width = Math.max(max_width, key.length)
         max_width_right = Math.max(max_width_right, right)
+        const d = downloads[key] ? prettyBytes(downloads[key]).indexOf(' ') : 0
+        download_width = Math.max(download_width, d)
       }
       max_width_right += 3 // space 'kB'
+      download_width += 3 // space 'kB'
       for (const key of keysBySize) {
         stdout += key.padEnd(max_width) + '  ' + prettyBytes(packages[key]).padStart(max_width_right)
         if ((download = downloads[key])) {
           downloads_total += download
-          stdout += ' (' + prettyBytes(download) + ')'
+          stdout += ' (' + prettyBytes(download).padStart(download_width) + ')'
+        }
+        if (dependencies[key]) {
+          stdout += ' ' + '█'.repeat(dependencies[key]) + ' ' + dependencies[key] + ' dependencies'
         }
         stdout += '\n'
       }
@@ -311,6 +325,7 @@ pre { font: inherit; margin: 0 50px 50px }
   }
 
   function decorate_dependents(dependents) {
+    console.log(dependents)
     let lines = $stdout.textContent.split('\n')
     let end = lines.findIndex(line => line[0] === '-')
     $stdout.textContent = '\n'
