@@ -208,21 +208,21 @@ pre { font: inherit; margin: 0 50px 50px }
         }
 
         const tasks = []
+        let dependencies_count = 0
         if (info.dependencies) for (const dep in info.dependencies) {
+          dependencies_count++
           tasks.push(load(dep + '@' + info.dependencies[dep], { parent: full }))
         }
         if (info.peerDependencies) for (const dep in info.peerDependencies) {
           if (!info.peerDependenciesMeta || info.peerDependenciesMeta[dep]?.optional !== true) {
+            dependencies_count++
             tasks.push(load(dep + '@' + info.peerDependencies[dep], { parent: full }))
           }
         }
         if (info.optionalDependencies) for (const dep in info.optionalDependencies) {
           tasks.push(load(dep + '@' + info.optionalDependencies[dep], { parent: full }))
         }
-        dependencies[full] = Object.keys({
-          ...info.dependencies,
-          ...info.peerDependencies,
-        }).length
+        dependencies[full] = dependencies_count
 
         await Promise.allSettled(tasks)
       } else {
@@ -247,7 +247,7 @@ pre { font: inherit; margin: 0 50px 50px }
     }
 
     if (Object.keys(packages).length > 0) {
-      console.log(structuredClone({ packages, downloads, failed, dependents }))
+      console.log(structuredClone({ packages, downloads, failed, dependents, dependencies }))
 
       const keysBySize = Object.keys(packages).sort((a, b) => packages[b] - packages[a])
       let max_width = 0, max_width_right = 0, stdout = '\n', total = 0,
@@ -325,7 +325,6 @@ pre { font: inherit; margin: 0 50px 50px }
   }
 
   function decorate_dependents(dependents) {
-    console.log(dependents)
     let lines = $stdout.textContent.split('\n')
     let end = lines.findIndex(line => line[0] === '-')
     $stdout.textContent = '\n'
