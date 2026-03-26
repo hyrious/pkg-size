@@ -42,8 +42,11 @@ pre { font: inherit; margin: 0 50px 50px }
       cpu = bitness === '64' ? 'x64' : 'x86'
     } else {
       const ua = navigator.userAgent
-      os = ua.includes('Macintosh') ? 'darwin' : ua.includes('Windows') ? 'win32' : 'linux'
-      cpu = ua.includes('WOW64') || ua.includes('Win64') || ua.includes('x64') ? 'x64' : 'x86'
+      os = ua.includes('Mac OS X') ? 'darwin' : ua.includes('Windows') ? 'win32' : 'linux'
+      cpu = ua.includes('WOW64') || ua.includes('Win64') || ua.includes('x86_64') ? 'x64' : 'x86'
+    }
+    if (os === 'darwin') {
+      cpu = 'arm64'
     }
     return { os, cpu }
   })()
