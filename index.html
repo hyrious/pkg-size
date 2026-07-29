@@ -76,7 +76,12 @@ pre { font: inherit; margin: 0 50px 50px }
       name = spec
       spec = '*'
     }
-    if (!semver.test(spec)) {
+    if (semver.test(spec)) {
+      if (spec !== '*') {
+        let n = spec.match(/^[\s=v]*/)[0].length
+        if (n) spec = spec.slice(n)
+      }
+    } else {
       let resolved = await fetch(`https://data.jsdelivr.com/v1/package/resolve/npm/${name}@${spec}`).then(r => r.ok && r.json())
       if (resolved) spec = resolved.version
       else {
